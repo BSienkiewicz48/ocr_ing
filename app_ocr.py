@@ -3,7 +3,6 @@
 
 import io
 import re
-import hashlib
 from datetime import datetime
 
 import numpy as np
@@ -12,22 +11,39 @@ import fitz  # PyMuPDF
 import streamlit as st
 
 
-
-# 3) Możesz też użyć st.secrets:
-#    .streamlit/secrets.toml:
-#    [auth]
-#    password_hash = "twoj_hash_sha256"
-PASSWORD_HASH = st.secrets["password"]
+# =============================
+# USTAWIENIA / HASŁO (PLAINTEXT)
+# =============================
+# Oczekujemy klucza w .streamlit/secrets.toml:
+# wariant A (prosty):
+# password = "TwojeHaslo"
+#
+# albo wariant B (z sekcją):
+# [auth]
+# password = "TwojeHaslo"
+#
+# Hasło jest porównywane 1:1 (bez hashy).
+PASSWORD = (
+    st.secrets.get("password")
+    or (st.secrets.get("auth", {}) or {}).get("password")
+)
 
 # -----------------------------
 # FUNKCJE POMOCNICZE
 # -----------------------------
 def check_password() -> bool:
     """
-    Prosty gate hasłem:
+    Prosty gate hasłem (bez hashowania):
     - zapamiętuje w session_state po poprawnym logowaniu
-    - porównanie z hashem SHA-256
+    - porównuje dokładnie do wartości w st.secrets
     """
+    if PASSWORD is None:
+        st.error(
+            "Brak hasła w `st.secrets`. Dodaj `password = \"...\"` "
+            "lub `[auth]\npassword = \"...\"` w `.streamlit/secrets.toml`."
+        )
+        return False
+
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
 
@@ -37,8 +53,9 @@ def check_password() -> bool:
     with st.form("login", clear_on_submit=False):
         pwd = st.text_input("Hasło", type="password")
         submitted = st.form_submit_button("Zaloguj")
+
     if submitted:
-        if hashlib.sha256(pwd.encode("utf-8")).hexdigest() == PASSWORD_HASH:
+        if pwd == PASSWORD:
             st.session_state.authenticated = True
             return True
         else:
@@ -86,7 +103,6 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     """
 
     # --- Filtry na podstawie pozycji Y0 (usuwamy nagłówki/stopki) ---
-    # Uwaga: 'Strona' to liczba całkowita, więc w warunku nie porównujemy do str
     df_OCR = df_OCR.loc[~df_OCR["Y0"].between(29.32, 80)]
     df_OCR = df_OCR.loc[~df_OCR["Y0"].between(765.52, 765.53)]
     df_OCR = df_OCR.loc[~((df_OCR["Y0"].between(29.32, 278)) & (df_OCR["Strona"] == 1))]
@@ -125,11 +141,9 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     df_OCR["Text"] = None
     df_OCR["Amount"] = None
 
-    # --- Mapowanie: dla wierszy X0 == 81 -> znajdź kolejne X0==246 (opis) i X0 w [418,450.5] (kwota) ---
+    # --- Mapowanie: X0 == 81 -> szukamy dalej X0==246 (opis) i X0 w [418,450.5] (kwota) ---
     idx_81 = df_OCR[df_OCR["X0"].round(2) == 81.00].index
     for index in idx_81:
-        # Szukamy dalej w dół po DataFrame
-        # UWAGA: działamy na pełnym df_OCR (posortowany)
         next_246_index = df_OCR.loc[index + 1 :, "X0"][df_OCR["X0"].round(0) == 246].index.min()
         if pd.notna(next_246_index):
             df_OCR.loc[index, "Text"] = df_OCR.loc[next_246_index, "Tekst"]
@@ -143,7 +157,7 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
         if pd.notna(next_amount_index):
             df_OCR.loc[index, "Amount"] = df_OCR.loc[next_amount_index, "Tekst"]
 
-    # --- Kolumna Date: przenosimy datę z wierszy X0 ~ 30.19-30.20 do najbliższego następnego X0==81 ---
+    # --- Kolumna Date: z X0 ~ 30.19-30.20 do najbliższego następnego X0==81 ---
     df_OCR["Date"] = None
     idx_date = df_OCR[df_OCR["X0"].between(30.19, 30.20)].index
     for index in idx_date:
@@ -153,8 +167,6 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
 
     # --- Porządki kolumn ---
     df_OCR.drop(["Y0", "X1", "Y1"], axis=1, inplace=True, errors="ignore")
-    # Zostawiamy X0 tylko na chwilę do debugowania – potem i tak go usuwamy:
-    # Usuwamy rekordy bez "Text" (tam nie mamy pary do Amount/Date)
     df_OCR.dropna(subset=["Text"], inplace=True)
 
     df_OCR["Partner name"] = df_OCR["Tekst"]
@@ -164,10 +176,8 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     df_OCR = df_OCR[["Page", "Date", "Partner name", "Text", "Amount", "X0", "Tekst"]]
 
     # --- Rozbicie Amount na Currency i Amount ---
-    # Założenie: waluta to 3 ostatnie znaki
     df_OCR["Currency"] = df_OCR["Amount"].astype(str).str[-3:]
     df_OCR["Amount"] = df_OCR["Amount"].astype(str).str[:-3].str.strip()
-    # Spróbujmy konwersji Amount do float (jeśli się da, uwzględniając ewentualne spacje/komy)
     df_OCR["Amount"] = (
         df_OCR["Amount"]
         .str.replace("\u00A0", "", regex=False)
@@ -224,12 +234,8 @@ def split_column_to_rows(df: pd.DataFrame, column_to_split: str) -> pd.DataFrame
     rows = []
     for _, row in df.iterrows():
         base = row.drop(labels=[column_to_split]).to_dict()
-        values = []
         v = row.get(column_to_split, None)
-        if pd.notna(v) and isinstance(v, str) and v.strip():
-            values = v.split()
-        else:
-            values = [None]
+        values = v.split() if (pd.notna(v) and isinstance(v, str) and v.strip()) else [None]
         for val in values:
             new_row = dict(base)
             new_row[column_to_split] = val
@@ -253,7 +259,7 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="Payments_OCR") -> bytes:
 st.set_page_config(page_title="PDF → Excel (OCR wyciąg płatności)", page_icon="📄", layout="wide")
 
 st.title("📄➡️📊 PDF → Excel: wyciąg płatności (OCR)")
-st.caption("PyMuPDF + pandas | zabezpieczone hasłem")
+st.caption("PyMuPDF + pandas | zabezpieczone prostym hasłem (plaintext)")
 
 # Gate hasłem
 if not check_password():
@@ -316,6 +322,6 @@ elif not uploaded and process_btn:
 
 st.divider()
 st.caption(
-    "© 2025 • Aplikacja demonstracyjna. Zmień hasło! "
-    "Możesz ustawić hash w `st.secrets['auth']['password_hash']` lub podać jawne hasło w `PLAINTEXT_PASSWORD` (tylko testowo)."
+    "© 2025 • Aplikacja demonstracyjna. Pamiętaj, że przechowywanie hasła w plaintext w secrets jest OK na prywatny/mały projekt, "
+    "ale do produkcji rozważ bardziej bezpieczne rozwiązanie (np. provider SSO)."
 )
