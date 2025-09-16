@@ -310,9 +310,6 @@ if uploaded and process_btn:
             with st.expander("Podgląd wyników (pierwsze wiersze)"):
                 st.dataframe(new_df.head(200), use_container_width=True)
 
-            with st.expander("Szczegóły techniczne (debug)"):
-                st.write("Liczba wierszy (po rozbiciu FV):", len(new_df))
-                st.write("Kolumny:", list(new_df.columns))
 
     except Exception as e:
         st.error(f"Wystąpił błąd: {e}")
@@ -321,5 +318,6 @@ elif not uploaded and process_btn:
     st.warning("Najpierw wgraj plik PDF.")
 
 st.divider()
+
 
 
