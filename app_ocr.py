@@ -240,7 +240,6 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="Payments_OCR") -> bytes:
 st.set_page_config(page_title="PDF → Excel (OCR wyciąg płatności)", page_icon="📄", layout="wide")
 
 st.title("📄➡️📊 PDF → Excel: wyciąg płatności (OCR)")
-st.caption("PyMuPDF + pandas | logika OCR zgodna z Twoim skryptem bazowym (ING)")
 
 # Gate hasłem
 if not check_password():
@@ -295,3 +294,4 @@ elif not uploaded and process_btn:
     st.warning("Najpierw wgraj plik PDF.")
 
 st.divider()
+
