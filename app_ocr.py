@@ -63,6 +63,7 @@ def extract_df_from_pdf(file_bytes: bytes) -> pd.DataFrame:
     """
     Otwiera PDF z bajtów i zwraca surowy DataFrame 'df_OCR' z polami:
     Strona, Tekst, X0, Y0, X1, Y1
+    (kolejność rekordów = kolejność zwrócona przez PyMuPDF)
     """
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     data = []
@@ -85,85 +86,83 @@ def extract_df_from_pdf(file_bytes: bytes) -> pd.DataFrame:
                             }
                         )
     doc.close()
-    df = pd.DataFrame(data)
-    return df
+    return pd.DataFrame(data)
 
 
 def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     """
-    PRZETWARZANIE IDENTYCZNE jak w dostarczonym skrypcie:
+    PRZETWARZANIE 1:1 z Twoim skryptem bazowym (bez sortowania przed grupowaniem):
     - filtry Y0, tekstowe, X0
-    - grupowanie po zmianach X0 (bez zaokrągleń)
-    - mapowanie Text (z X0==246 po X0==81), Amount (pierwsze X0 w [418,450.5] po X0==81)
-    - Date (z X0 w [30.19,30.20] do najbliższego kolejnego X0==81)
-    - kolumny końcowe: Page, Date, Partner name, Text, Amount, Currency, FV
-    - FV: czyszczenie, PL/DE prefiks, regex (PL|DE)\d{10}, unikalizacja
+    - group = (X0 != shift(X0)).cumsum(), Tekst = transform(' '.join) per (X0, group)
+    - Text: dla X0==81 -> pierwszy kolejny X0==246; Amount: pierwszy kolejny X0∈[418,450.5]
+    - Date: wiersz z X0∈[30.19,30.20] -> najbliższy następny X0==81
+    - końcowe kolumny + FV jak w bazie
     """
 
-    # --- Filtry na podstawie pozycji Y0 (usuwamy nagłówki/stopki) ---
+    # --- Filtry Y0 (nagłówki/stopki) ---
     df_OCR = df_OCR.loc[~df_OCR["Y0"].between(29.32, 80)]
     df_OCR = df_OCR.loc[~df_OCR["Y0"].between(765.52, 765.53)]
-    # w oryginale porównanie było do '1' (string); rzutujemy 'Strona' na str
-    df_OCR = df_OCR.loc[~((df_OCR["Y0"].between(29.32, 278)) & (df_OCR["Strona"].astype(str) == "1"))]
+    df_OCR = df_OCR.loc[
+        ~((df_OCR["Y0"].between(29.32, 278)) & (df_OCR["Strona"].astype(str) == "1"))
+    ]
 
     # --- Filtry tekstowe ---
     df_OCR = df_OCR[~df_OCR["Tekst"].str.startswith("Wygenerowano", na=False)]
-    df_OCR = df_OCR[~df_OCR["Tekst"].isin(
-        [
-            "Kontrahent",
-            "Tytuł operacji",
-            "Typ operacji",
-            "Kwota",
-            "Waluta",
-            "Saldo po operacji",
-            "Rachunek firmy",
-            "uznanie",
-        ]
-    )]
+    df_OCR = df_OCR[
+        ~df_OCR["Tekst"].isin(
+            [
+                "Kontrahent",
+                "Tytuł operacji",
+                "Typ operacji",
+                "Kwota",
+                "Waluta",
+                "Saldo po operacji",
+                "Rachunek firmy",
+                "uznanie",
+            ]
+        )
+    ]
 
-    # Usuwanie wierszy, które zawierają wzór numeru (np. numer rachunku)
+    # Usuwanie wzoru liczbowego (np. numer rachunku)
     pattern = r"\b\d{2}\s+\d{4}\s+\d{4}\s+\d{4}\s+\d{4}\s+\d{4}\s+\d{4}\b"
-    df_OCR = df_OCR[~df_OCR["Tekst"].str.contains(pattern, na=False, regex=True)]
+    df_OCR = df_OCR[~df_OCR["Tekst"].str.contains(pattern, regex=True, na=False)]
 
-    # --- Filtry po X0 ---
-    # (dokładnie te same zakresy co w skrypcie docelowym)
+    # --- Filtry X0 ---
     df_OCR = df_OCR.loc[~df_OCR["X0"].between(519.141, 519.142)]
     df_OCR = df_OCR.loc[~df_OCR["X0"].between(500, 530)]
     df_OCR = df_OCR.loc[~df_OCR["X0"].between(263, 264)]
 
-    # --- Grupowanie po zmianach X0 (BEZ zaokrąglania; jak w skrypcie) ---
-    df_OCR = df_OCR.sort_values(by=["Strona", "Y0", "X0"]).reset_index(drop=True)
+    # >>> KLUCZOWE: BEZ SORTOWANIA <<<
+    # Grupowanie po zmianach X0 (dokładnie jak w bazie)
     df_OCR["group"] = (df_OCR["X0"] != df_OCR["X0"].shift()).cumsum()
     df_OCR["Tekst"] = df_OCR.groupby(["X0", "group"])["Tekst"].transform(" ".join)
     df_OCR = df_OCR.drop_duplicates(subset=["X0", "group"]).drop(columns="group")
 
-    # --- Inicjalizacja kolumn ---
+    # Inicjalizacja
     df_OCR["Text"] = None
     df_OCR["Amount"] = None
 
-    # --- Mapowanie: DOKŁADNE porównania X0 (==) jak w skrypcie ---
-    for index in df_OCR[df_OCR["X0"] == 81].index:
-        next_246_index = df_OCR.loc[index + 1 :, "X0"][df_OCR["X0"] == 246].index.min()
-        if pd.notna(next_246_index):
-            df_OCR.loc[index, "Text"] = df_OCR.loc[next_246_index, "Tekst"]
+    # Mapowanie: X0==81 -> Text z pierwszego kolejnego X0==246, Amount z [418,450.5]
+    for idx in df_OCR[df_OCR["X0"] == 81].index:
+        next_246 = df_OCR.loc[idx + 1 :, "X0"][df_OCR["X0"] == 246].index.min()
+        if pd.notna(next_246):
+            df_OCR.loc[idx, "Text"] = df_OCR.loc[next_246, "Tekst"]
 
-        next_amount_index = (
-            df_OCR.loc[index + 1 :, "X0"]
-            .where(df_OCR["X0"].between(418, 450.5))
-            .dropna()
-            .index.min()
+        next_amt = (
+            df_OCR.loc[idx + 1 :, "X0"].where(df_OCR["X0"].between(418, 450.5)).dropna().index.min()
         )
-        if pd.notna(next_amount_index):
-            df_OCR.loc[index, "Amount"] = df_OCR.loc[next_amount_index, "Tekst"]
+        if pd.notna(next_amt):
+            df_OCR.loc[idx, "Amount"] = df_OCR.loc[next_amt, "Tekst"]
 
-    # --- Kolumna Date: X0 w [30.19, 30.20] -> do najbliższego następnego X0 == 81 ---
+    # Date: wiersz z X0 w [30.19,30.20] -> najbliższy następny X0==81
     df_OCR["Date"] = None
-    for index in df_OCR[(df_OCR["X0"] >= 30.19) & (df_OCR["X0"] <= 30.20)].index:
-        next_81_index = df_OCR.loc[index + 1 :, "X0"][df_OCR["X0"] == 81].index.min()
-        if pd.notna(next_81_index):
-            df_OCR.loc[next_81_index, "Date"] = df_OCR.loc[index, "Tekst"]
+    mask_date = (df_OCR["X0"] >= 30.19) & (df_OCR["X0"] <= 30.20)
+    for idx in df_OCR[mask_date].index:
+        next_81 = df_OCR.loc[idx + 1 :, "X0"][df_OCR["X0"] == 81].index.min()
+        if pd.notna(next_81):
+            df_OCR.loc[next_81, "Date"] = df_OCR.loc[idx, "Tekst"]
 
-    # --- Porządki kolumn (jak w skrypcie docelowym) ---
+    # Porządki kolumn
     df_OCR.drop(["X0", "Y0", "X1", "Y1"], axis=1, inplace=True, errors="ignore")
     df_OCR.dropna(subset=["Text"], inplace=True)
 
@@ -171,19 +170,17 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     df_OCR.drop(columns="Tekst", inplace=True, errors="ignore")
     df_OCR.rename(columns={"Strona": "Page"}, inplace=True)
 
-    # Kolejność kolumn
+    # Kolejność kolumn 1:1
     df_OCR = df_OCR[["Page", "Date", "Partner name", "Text", "Amount"]]
 
-    # --- Rozbicie Amount na Currency i Amount (identycznie: ostatnie 3 znaki) ---
+    # Amount -> Currency + Amount (ostatnie 3 znaki)
     df_OCR["Currency"] = df_OCR["Amount"].astype(str).str[-3:]
     df_OCR["Amount"] = df_OCR["Amount"].astype(str).str[:-3]
 
-    # --- FV jak w skrypcie docelowym ---
+    # FV z Text (czyszczenie + prefiksy + regex + deduplikacja)
     df_OCR["FV"] = df_OCR["Text"].copy()
-    df_OCR["FV"] = df_OCR["FV"].str.replace(" ", "", regex=True)
-    df_OCR["FV"] = df_OCR["FV"].str.upper()
+    df_OCR["FV"] = df_OCR["FV"].str.replace(" ", "", regex=True).str.upper()
 
-    # Dodawanie przedrostków PL/DE (tylko jeśli brak istniejącego prefiksu)
     df_OCR["FV"] = df_OCR["FV"].apply(
         lambda x: x.replace("24270", "PL24270") if ("24270" in x and "PL" not in x) else x
     )
@@ -191,48 +188,41 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
         lambda x: x.replace("24280", "DE24280") if ("24280" in x and "DE" not in x) else x
     )
 
-    # Ekstrakcja kodów PL/DE + 10 cyfr
-    def extract_codes(value: str):
-        if not isinstance(value, str):
+    def extract_codes(v):
+        if not isinstance(v, str):
             return None
-        matches = re.findall(r"(?:PL|DE)\d{10}", value)
-        return " ".join(matches) if matches else None
+        m = re.findall(r"(?:PL|DE)\d{10}", v)
+        return " ".join(m) if m else None
 
     df_OCR["FV"] = df_OCR["FV"].apply(extract_codes)
 
-    # Usunięcie duplikatów kodów w obrębie jednego wiersza
-    def remove_duplicates(val):
-        if pd.isna(val):
-            return val
-        values = str(val).split()
-        unique_values = list(dict.fromkeys(values))
-        return " ".join(unique_values)
+    def dedup_space_separated(v):
+        if pd.isna(v):
+            return v
+        parts = str(v).split()
+        return " ".join(dict.fromkeys(parts))
 
-    df_OCR["FV"] = df_OCR["FV"].apply(remove_duplicates)
+    df_OCR["FV"] = df_OCR["FV"].apply(dedup_space_separated)
 
-    # Ostateczna kolejność kolumn
+    # Finalna kolejność
     df_OCR = df_OCR[["Page", "Date", "Partner name", "Text", "Amount", "Currency", "FV"]]
-
     return df_OCR
 
 
 def split_column_to_rows(df: pd.DataFrame, column_to_split: str) -> pd.DataFrame:
-    """
-    Rozbija wartości z kolumny (spacja-separowane) na osobne wiersze,
-    kopiując pozostałe kolumny. (logika jak w skrypcie docelowym)
-    """
+    """Rozbija wartości z kolumny (spacja-separowane) na osobne wiersze (jak w bazie)."""
     rows = []
     for _, row in df.iterrows():
-        if pd.notna(row.get(column_to_split)):
-            split_values = str(row[column_to_split]).split()
-            for value in split_values:
-                new_row = row.to_dict()
-                new_row[column_to_split] = value
-                rows.append(new_row)
+        val = row.get(column_to_split)
+        if pd.notna(val):
+            for token in str(val).split():
+                r = row.to_dict()
+                r[column_to_split] = token
+                rows.append(r)
         else:
-            new_row = row.to_dict()
-            new_row[column_to_split] = None
-            rows.append(new_row)
+            r = row.to_dict()
+            r[column_to_split] = None
+            rows.append(r)
     return pd.DataFrame(rows)
 
 
@@ -250,7 +240,7 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="Payments_OCR") -> bytes:
 st.set_page_config(page_title="PDF → Excel (OCR wyciąg płatności)", page_icon="📄", layout="wide")
 
 st.title("📄➡️📊 PDF → Excel: wyciąg płatności (OCR)")
-st.caption("PyMuPDF + pandas | logika OCR zgodna z Twoim skryptem referencyjnym (ING)")
+st.caption("PyMuPDF + pandas | logika OCR zgodna z Twoim skryptem bazowym (ING)")
 
 # Gate hasłem
 if not check_password():
@@ -264,8 +254,6 @@ with st.expander("Instrukcja", expanded=False):
         1. Wgraj plik **PDF** z wyciągiem.  
         2. Kliknij **Przetwórz**.  
         3. Pobierz **Excel** z wynikami lub obejrzyj podgląd tabeli.  
-
-        > Uwaga: logika przetwarzania odpowiada dokładnie podanemu skryptowi (ING).
         """
     )
 
@@ -285,7 +273,6 @@ if uploaded and process_btn:
             df_OCR = process_dataframe(raw_df)
             new_df = split_column_to_rows(df_OCR, "FV")
 
-            # Nazwa pliku wyjściowego na podstawie nazwy wejściowej
             base_filename = uploaded.name.rsplit(".", 1)[0]
             excel_bytes = to_excel_bytes(new_df, sheet_name="Payments_OCR")
 
