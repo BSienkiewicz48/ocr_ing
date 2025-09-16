@@ -3,53 +3,31 @@
 
 import io
 import re
-import hmac
 import hashlib
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import fitz  # PyMuPDF
 import streamlit as st
 
-# =============================
-# USTAWIENIA / SECRETS
-# =============================
-# Oczekiwana struktura .streamlit/secrets.toml:
-#   [auth]
-#   # Wybierz JEDNĄ z opcji:
-#   # 1) jawne hasło:
-#   # password = "MojeHaslo123"
-#   #
-#   # 2) hash SHA-256:
-#   # password_hash = "sha256_hasla"
-#
-# Kod sam rozpozna, co podałeś.
-_auth = st.secrets.get("auth", {})
-PLAINTEXT_PASSWORD = _auth.get("password")           # opcja 1
-PASSWORD_HASH = _auth.get("password_hash")           # opcja 2 (sha256)
 
-def _password_ok(user_input: str) -> bool:
-    """Sprawdza hasło względem secrets: najpierw hash, potem plaintext."""
-    if PASSWORD_HASH:
-        # porównanie do SHA-256
-        digest = hashlib.sha256(user_input.encode("utf-8")).hexdigest()
-        return hmac.compare_digest(digest, PASSWORD_HASH)
-    if PLAINTEXT_PASSWORD:
-        # porównanie do jawnego hasła
-        return hmac.compare_digest(user_input, PLAINTEXT_PASSWORD)
-    # Brak konfiguracji w secrets
-    st.error(
-        "Brak hasła w `secrets`. Dodaj w `.streamlit/secrets.toml`:\n\n"
-        "[auth]\npassword = \"TwojeHaslo\"\n\n"
-        "lub\n\n"
-        "[auth]\npassword_hash = \"sha256_TwojegoHasla\""
-    )
-    return False
 
-# =============================
-# LOGIKA AUTORYZACJI
-# =============================
+# 3) Możesz też użyć st.secrets:
+#    .streamlit/secrets.toml:
+#    [auth]
+#    password_hash = "twoj_hash_sha256"
+PASSWORD_HASH = st.secrets["password"]
+
+# -----------------------------
+# FUNKCJE POMOCNICZE
+# -----------------------------
 def check_password() -> bool:
-    """Prosty gate hasłem + zapamiętanie sesji."""
+    """
+    Prosty gate hasłem:
+    - zapamiętuje w session_state po poprawnym logowaniu
+    - porównanie z hashem SHA-256
+    """
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
 
@@ -59,25 +37,26 @@ def check_password() -> bool:
     with st.form("login", clear_on_submit=False):
         pwd = st.text_input("Hasło", type="password")
         submitted = st.form_submit_button("Zaloguj")
-
     if submitted:
-        if _password_ok(pwd):
+        if hashlib.sha256(pwd.encode("utf-8")).hexdigest() == PASSWORD_HASH:
             st.session_state.authenticated = True
             return True
         else:
             st.error("Błędne hasło.")
             return False
+    else:
+        st.info("Podaj hasło, aby skorzystać z aplikacji.")
+        return False
 
-    st.info("Podaj hasło, aby skorzystać z aplikacji.")
-    return False
 
-# =============================
-# FUNKCJE PDF → DF → EXCEL
-# =============================
 def extract_df_from_pdf(file_bytes: bytes) -> pd.DataFrame:
-    """Otwiera PDF z bajtów i zwraca surowy DataFrame."""
+    """
+    Otwiera PDF z bajtów i zwraca surowy DataFrame 'df_OCR' z polami:
+    Strona, Tekst, X0, Y0, X1, Y1
+    """
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     data = []
+
     for page_number, page in enumerate(doc, start=1):
         text_instances = page.get_text("dict")["blocks"]
         for instance in text_instances:
@@ -95,51 +74,68 @@ def extract_df_from_pdf(file_bytes: bytes) -> pd.DataFrame:
                             }
                         )
     doc.close()
-    return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+    return df
 
 
 def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
-    """Twoja logika czyszczenia i mapowania kolumn."""
-    # Filtry Y0
+    """
+    Odwzorowanie Twojej logiki czyszczenia / łączenia / mapowania kolumn
+    aż do otrzymania finalnego df_OCR z kolumnami:
+    Page, Date, Partner name, Text, Amount, Currency, FV
+    """
+
+    # --- Filtry na podstawie pozycji Y0 (usuwamy nagłówki/stopki) ---
+    # Uwaga: 'Strona' to liczba całkowita, więc w warunku nie porównujemy do str
     df_OCR = df_OCR.loc[~df_OCR["Y0"].between(29.32, 80)]
     df_OCR = df_OCR.loc[~df_OCR["Y0"].between(765.52, 765.53)]
     df_OCR = df_OCR.loc[~((df_OCR["Y0"].between(29.32, 278)) & (df_OCR["Strona"] == 1))]
 
-    # Filtry tekstowe
+    # --- Filtry tekstowe ---
     df_OCR = df_OCR[~df_OCR["Tekst"].str.startswith("Wygenerowano", na=False)]
     df_OCR = df_OCR[~df_OCR["Tekst"].isin(
-        ["Kontrahent", "Tytuł operacji", "Typ operacji", "Kwota", "Waluta",
-         "Saldo po operacji", "Rachunek firmy", "uznanie"]
+        [
+            "Kontrahent",
+            "Tytuł operacji",
+            "Typ operacji",
+            "Kwota",
+            "Waluta",
+            "Saldo po operacji",
+            "Rachunek firmy",
+            "uznanie",
+        ]
     )]
 
-    # Wzór numeru (np. rachunku)
+    # Usuwanie wierszy, które zawierają wzór numeru (np. numer rachunku)
     pattern = r"\b\d{2}\s+\d{4}\s+\d{4}\s+\d{4}\s+\d{4}\s+\d{4}\s+\d{4}\b"
     df_OCR = df_OCR[~df_OCR["Tekst"].str.contains(pattern, na=False, regex=True)]
 
-    # Filtry X0
+    # --- Filtry po X0 ---
     df_OCR = df_OCR.loc[~df_OCR["X0"].between(519.141, 519.142)]
     df_OCR = df_OCR.loc[~df_OCR["X0"].between(500, 530)]
     df_OCR = df_OCR.loc[~df_OCR["X0"].between(263, 264)]
 
-    # Grupowanie + łączenie
+    # --- Grupowanie po "bieżących słupkach" X0, łączenie Tekst ---
     df_OCR = df_OCR.sort_values(by=["Strona", "Y0", "X0"]).reset_index(drop=True)
     df_OCR["group"] = (df_OCR["X0"].round(3) != df_OCR["X0"].round(3).shift()).cumsum()
     df_OCR["Tekst"] = df_OCR.groupby(["X0", "group"])["Tekst"].transform(" ".join)
     df_OCR = df_OCR.drop_duplicates(subset=["X0", "group"]).drop(columns="group")
 
-    # Kolumny docelowe
+    # --- Inicjalizacja kolumn ---
     df_OCR["Text"] = None
     df_OCR["Amount"] = None
 
-    # Mapowanie opis/kwota do X0==81
+    # --- Mapowanie: dla wierszy X0 == 81 -> znajdź kolejne X0==246 (opis) i X0 w [418,450.5] (kwota) ---
     idx_81 = df_OCR[df_OCR["X0"].round(2) == 81.00].index
     for index in idx_81:
-        next_246_index = df_OCR.loc[index + 1:, "X0"][df_OCR["X0"].round(0) == 246].index.min()
+        # Szukamy dalej w dół po DataFrame
+        # UWAGA: działamy na pełnym df_OCR (posortowany)
+        next_246_index = df_OCR.loc[index + 1 :, "X0"][df_OCR["X0"].round(0) == 246].index.min()
         if pd.notna(next_246_index):
             df_OCR.loc[index, "Text"] = df_OCR.loc[next_246_index, "Tekst"]
 
         next_amount_index = (
-            df_OCR.loc[index + 1:, "X0"]
+            df_OCR.loc[index + 1 :, "X0"]
             .where(df_OCR["X0"].between(418, 450.5))
             .dropna()
             .index.min()
@@ -147,27 +143,31 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
         if pd.notna(next_amount_index):
             df_OCR.loc[index, "Amount"] = df_OCR.loc[next_amount_index, "Tekst"]
 
-    # Przeniesienie daty z X0 ~ 30.19-30.20 do najbliższego następnego X0==81
+    # --- Kolumna Date: przenosimy datę z wierszy X0 ~ 30.19-30.20 do najbliższego następnego X0==81 ---
     df_OCR["Date"] = None
     idx_date = df_OCR[df_OCR["X0"].between(30.19, 30.20)].index
     for index in idx_date:
-        next_81_index = df_OCR.loc[index + 1:, "X0"][df_OCR["X0"].round(2) == 81.00].index.min()
+        next_81_index = df_OCR.loc[index + 1 :, "X0"][df_OCR["X0"].round(2) == 81.00].index.min()
         if pd.notna(next_81_index):
             df_OCR.loc[next_81_index, "Date"] = df_OCR.loc[index, "Tekst"]
 
-    # Porządki
+    # --- Porządki kolumn ---
     df_OCR.drop(["Y0", "X1", "Y1"], axis=1, inplace=True, errors="ignore")
+    # Zostawiamy X0 tylko na chwilę do debugowania – potem i tak go usuwamy:
+    # Usuwamy rekordy bez "Text" (tam nie mamy pary do Amount/Date)
     df_OCR.dropna(subset=["Text"], inplace=True)
 
     df_OCR["Partner name"] = df_OCR["Tekst"]
     df_OCR.rename(columns={"Strona": "Page"}, inplace=True)
 
-    # Kolejność
+    # Finalna kolejność
     df_OCR = df_OCR[["Page", "Date", "Partner name", "Text", "Amount", "X0", "Tekst"]]
 
-    # Kwota + waluta
+    # --- Rozbicie Amount na Currency i Amount ---
+    # Założenie: waluta to 3 ostatnie znaki
     df_OCR["Currency"] = df_OCR["Amount"].astype(str).str[-3:]
     df_OCR["Amount"] = df_OCR["Amount"].astype(str).str[:-3].str.strip()
+    # Spróbujmy konwersji Amount do float (jeśli się da, uwzględniając ewentualne spacje/komy)
     df_OCR["Amount"] = (
         df_OCR["Amount"]
         .str.replace("\u00A0", "", regex=False)
@@ -178,10 +178,11 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     with np.errstate(all="ignore"):
         df_OCR["Amount"] = pd.to_numeric(df_OCR["Amount"], errors="coerce")
 
-    # FV
+    # --- FV z kolumny Text ---
     df_OCR["FV"] = df_OCR["Text"].fillna("").astype(str)
     df_OCR["FV"] = df_OCR["FV"].str.replace(" ", "", regex=True).str.upper()
 
+    # Dodawanie prefiksów PL/DE
     df_OCR["FV"] = df_OCR["FV"].apply(
         lambda x: x.replace("24270", "PL24270") if ("24270" in x and "PL" not in x) else x
     )
@@ -189,12 +190,14 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
         lambda x: x.replace("24280", "DE24280") if ("24280" in x and "DE" not in x) else x
     )
 
+    # Ekstrakcja kodów PL/DE + 10 cyfr
     def extract_codes(value):
         matches = re.findall(r"(?:PL|DE)\d{10}", value)
         return " ".join(matches) if matches else None
 
     df_OCR["FV"] = df_OCR["FV"].apply(extract_codes)
 
+    # Usunięcie duplikatów kodów w obrębie jednego wiersza
     def remove_duplicates(row):
         if pd.isna(row):
             return row
@@ -204,18 +207,29 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
 
     df_OCR["FV"] = df_OCR["FV"].apply(remove_duplicates)
 
+    # Usunięcie pól pomocniczych
     df_OCR.drop(columns=["X0", "Tekst"], inplace=True, errors="ignore")
+
+    # Ostateczna kolejność kolumn
     df_OCR = df_OCR[["Page", "Date", "Partner name", "Text", "Amount", "Currency", "FV"]]
+
     return df_OCR
 
 
 def split_column_to_rows(df: pd.DataFrame, column_to_split: str) -> pd.DataFrame:
-    """Rozbija kolumnę na wiele wierszy (po spacjach)."""
+    """
+    Rozbija wartości z kolumny (spacja-separowane) na osobne wiersze,
+    kopiując pozostałe kolumny.
+    """
     rows = []
     for _, row in df.iterrows():
         base = row.drop(labels=[column_to_split]).to_dict()
+        values = []
         v = row.get(column_to_split, None)
-        values = v.split() if (isinstance(v, str) and v.strip()) else [None]
+        if pd.notna(v) and isinstance(v, str) and v.strip():
+            values = v.split()
+        else:
+            values = [None]
         for val in values:
             new_row = dict(base)
             new_row[column_to_split] = val
@@ -224,19 +238,22 @@ def split_column_to_rows(df: pd.DataFrame, column_to_split: str) -> pd.DataFrame
 
 
 def to_excel_bytes(df: pd.DataFrame, sheet_name="Payments_OCR") -> bytes:
-    """Zapisuje DataFrame do Excela (w pamięci) i zwraca bajty."""
+    """
+    Zapisuje DataFrame do Excela (w pamięci) i zwraca bajty.
+    """
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
     return output.getvalue()
 
-# =============================
-# UI
-# =============================
+
+# -----------------------------
+# UI STREAMLIT
+# -----------------------------
 st.set_page_config(page_title="PDF → Excel (OCR wyciąg płatności)", page_icon="📄", layout="wide")
 
 st.title("📄➡️📊 PDF → Excel: wyciąg płatności (OCR)")
-st.caption("PyMuPDF + pandas | zabezpieczone hasłem (secrets)")
+st.caption("PyMuPDF + pandas | zabezpieczone hasłem")
 
 # Gate hasłem
 if not check_password():
@@ -250,6 +267,8 @@ with st.expander("Instrukcja", expanded=False):
         1. Wgraj plik **PDF** z wyciągiem.  
         2. Kliknij **Przetwórz**.  
         3. Pobierz **Excel** z wynikami lub obejrzyj podgląd tabeli.  
+
+        > Uwaga: logika czyszczenia i mapowania odpowiada Twojemu skryptowi (X0/Y0, pola *Text/Amount/Date/FV* itp.).
         """
     )
 
@@ -269,6 +288,7 @@ if uploaded and process_btn:
             df_OCR = process_dataframe(raw_df)
             new_df = split_column_to_rows(df_OCR, "FV")
 
+            # Nazwa pliku wyjściowego na podstawie nazwy wejściowej
             base_filename = uploaded.name.rsplit(".", 1)[0]
             excel_bytes = to_excel_bytes(new_df, sheet_name="Payments_OCR")
 
@@ -287,6 +307,7 @@ if uploaded and process_btn:
             with st.expander("Szczegóły techniczne (debug)"):
                 st.write("Liczba wierszy (po rozbiciu FV):", len(new_df))
                 st.write("Kolumny:", list(new_df.columns))
+
     except Exception as e:
         st.error(f"Wystąpił błąd: {e}")
 
@@ -294,4 +315,7 @@ elif not uploaded and process_btn:
     st.warning("Najpierw wgraj plik PDF.")
 
 st.divider()
-st.caption("© 2025 • Aplikacja demonstracyjna. Zabezpiecz hasło w `.streamlit/secrets.toml`.")
+st.caption(
+    "© 2025 • Aplikacja demonstracyjna. Zmień hasło! "
+    "Możesz ustawić hash w `st.secrets['auth']['password_hash']` lub podać jawne hasło w `PLAINTEXT_PASSWORD` (tylko testowo)."
+)
