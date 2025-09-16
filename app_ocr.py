@@ -259,7 +259,7 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="Payments_OCR") -> bytes:
 st.set_page_config(page_title="PDF → Excel (OCR wyciąg płatności)", page_icon="📄", layout="wide")
 
 st.title("📄➡️📊 PDF → Excel: wyciąg płatności (OCR)")
-st.caption("PyMuPDF + pandas | zabezpieczone prostym hasłem (plaintext)")
+
 
 # Gate hasłem
 if not check_password():
@@ -274,7 +274,7 @@ with st.expander("Instrukcja", expanded=False):
         2. Kliknij **Przetwórz**.  
         3. Pobierz **Excel** z wynikami lub obejrzyj podgląd tabeli.  
 
-        > Uwaga: logika czyszczenia i mapowania odpowiada Twojemu skryptowi (X0/Y0, pola *Text/Amount/Date/FV* itp.).
+        > Uwaga: logika czyszczenia i mapowania odpowiada tylko do wyciągów ING.
         """
     )
 
@@ -321,7 +321,5 @@ elif not uploaded and process_btn:
     st.warning("Najpierw wgraj plik PDF.")
 
 st.divider()
-st.caption(
-    "© 2025 • Aplikacja demonstracyjna. Pamiętaj, że przechowywanie hasła w plaintext w secrets jest OK na prywatny/mały projekt, "
-    "ale do produkcji rozważ bardziej bezpieczne rozwiązanie (np. provider SSO)."
-)
+
+
