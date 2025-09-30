@@ -134,7 +134,7 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     # (wąskie wycięcie artefaktu)
     df_OCR = df_OCR.loc[~df_OCR["X0"].between(519.141, 519.142)]
     # Z ogólnego okna 500–530 NIE usuwamy zakresu [517,523], żeby zachować salda
-    mask_remove_500_530 = df_OCR["X0"].between(500, 530) & ~df_OCR["X0"].between(517, 523)
+    mask_remove_500_530 = df_OCR["X0"].between(500, 530) & ~df_OCR["X0"].between(517, 524)
     df_OCR = df_OCR.loc[~mask_remove_500_530]
     df_OCR = df_OCR.loc[~df_OCR["X0"].between(263, 264)]
 
@@ -149,7 +149,7 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     df_OCR["Saldo po transakcji"] = None  # NOWA kolumna
 
     # Parametry wyszukania salda
-    BAL_X0_MIN, BAL_X0_MAX = 517.0, 523.0
+    BAL_X0_MIN, BAL_X0_MAX = 517.0, 524.0
     BAL_X1_TARGET, BAL_X1_TOL = 580.0, 0.6   # łapie 579.999999
     BAL_Y_TOL = 3.0                           # dopasowanie wiersza po Y0
 
@@ -328,3 +328,4 @@ elif not uploaded and process_btn:
     st.warning("Najpierw wgraj plik PDF.")
 
 st.divider()
+
