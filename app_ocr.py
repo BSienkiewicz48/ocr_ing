@@ -134,9 +134,9 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     # --- Filtry X0 ---
     df_OCR = df_OCR.loc[~df_OCR["X0"].between(519.141, 519.142)]
     # Uwaga: zachowujemy pozycje ~523.5 na potrzeby kolumny "Saldo po transakcji"
-    BAL_X0 = 517
+    BAL_X0 = 580
     BAL_TOL = 0.5  # tolerancja okna [523.0, 524.0]
-    mask_remove_500_530 = df_OCR["X0"].between(500, 530) & ~df_OCR["X0"].between(
+    mask_remove_500_530 = df_OCR["X1"].between(500, 530) & ~df_OCR["X1"].between(
         BAL_X0 - BAL_TOL, BAL_X0 + BAL_TOL
     )
     df_OCR = df_OCR.loc[~mask_remove_500_530]
@@ -321,4 +321,5 @@ elif not uploaded and process_btn:
     st.warning("Najpierw wgraj plik PDF.")
 
 st.divider()
+
 
