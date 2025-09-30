@@ -91,18 +91,17 @@ def extract_df_from_pdf(file_bytes: bytes) -> pd.DataFrame:
 
 def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     """
-    PRZETWARZANIE 1:1 z Twoim skryptem bazowym (bez sortowania przed grupowaniem),
-    z dodatkiem kolumny „Saldo po transakcji” pobieranej z X0≈523.5:
+    Przetwarzanie 1:1 z bazowego skryptu + kolumna „Saldo po transakcji”.
+    Logika:
     - filtry Y0, tekstowe
-    - filtry X0 z wyjątkiem okolic 523.5 (aby nie wyciąć salda)
+    - filtry X0 z wyjątkiem okolic X0≈523.5 (aby nie wyciąć wierszy salda)
     - group = (X0 != shift(X0)).cumsum(), Tekst = transform(' '.join) per (X0, group)
     - Text: dla X0==81 -> pierwszy kolejny X0==246
     - Amount: pierwszy kolejny X0∈[418,450.5]
-    - Saldo po transakcji: pierwszy kolejny X0≈523.5 (tolerancja)
+    - Saldo po transakcji: pierwszy kolejny wiersz z X1≈580 (tolerancja)
     - Date: wiersz z X0∈[30.19,30.20] -> najbliższy następny X0==81
     - końcowe kolumny + FV jak w bazie
     """
-
     # --- Filtry Y0 (nagłówki/stopki) ---
     df_OCR = df_OCR.loc[~df_OCR["Y0"].between(29.32, 80)]
     df_OCR = df_OCR.loc[~df_OCR["Y0"].between(765.52, 765.53)]
@@ -131,19 +130,17 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     pattern = r"\b\d{2}\s+\d{4}\s+\d{4}\s+\d{4}\s+\d{4}\s+\d{4}\s+\d{4}\b"
     df_OCR = df_OCR[~df_OCR["Tekst"].str.contains(pattern, regex=True, na=False)]
 
-    # --- Filtry X0 ---
+    # --- Filtry X0 (zachowujemy okolice X0≈523.5, bo tam jest saldo; X1 użyjemy do wyszukania celu) ---
     df_OCR = df_OCR.loc[~df_OCR["X0"].between(519.141, 519.142)]
-    # Uwaga: zachowujemy pozycje ~523.5 na potrzeby kolumny "Saldo po transakcji"
-    BAL_X0 = 580
-    BAL_TOL = 0.5  # tolerancja okna [523.0, 524.0]
-    mask_remove_500_530 = df_OCR["X1"].between(500, 530) & ~df_OCR["X1"].between(
-        BAL_X0 - BAL_TOL, BAL_X0 + BAL_TOL
+    BAL_KEEP_X0 = 523.5
+    BAL_KEEP_TOL = 1.0  # okno: [522.5, 524.5] – szerzej, żeby nie uciąć salda
+    mask_remove_500_530 = df_OCR["X0"].between(500, 530) & ~df_OCR["X0"].between(
+        BAL_KEEP_X0 - BAL_KEEP_TOL, BAL_KEEP_X0 + BAL_KEEP_TOL
     )
     df_OCR = df_OCR.loc[~mask_remove_500_530]
     df_OCR = df_OCR.loc[~df_OCR["X0"].between(263, 264)]
 
     # >>> KLUCZOWE: BEZ SORTOWANIA <<<
-    # Grupowanie po zmianach X0 (dokładnie jak w bazie)
     df_OCR["group"] = (df_OCR["X0"] != df_OCR["X0"].shift()).cumsum()
     df_OCR["Tekst"] = df_OCR.groupby(["X0", "group"])["Tekst"].transform(" ".join)
     df_OCR = df_OCR.drop_duplicates(subset=["X0", "group"]).drop(columns="group")
@@ -153,15 +150,18 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     df_OCR["Amount"] = None
     df_OCR["Saldo po transakcji"] = None  # NOWA kolumna
 
-    # Mapowanie: X0==81 -> Text z pierwszego kolejnego X0==246,
-    # Amount z [418,450.5], Saldo po transakcji z X0≈523.5
+    # Parametry wyszukania salda po X1
+    BAL_TARGET_X1 = 580.0
+    BAL_TARGET_TOL = 0.5  # okno: [579.5, 580.5] – łapie 579.999999
+
+    # Mapowanie z wierszy X0==81
     for idx in df_OCR[df_OCR["X0"] == 81].index:
-        # Text
+        # Text (X0==246)
         next_246 = df_OCR.loc[idx + 1 :, "X0"][df_OCR["X0"] == 246].index.min()
         if pd.notna(next_246):
             df_OCR.loc[idx, "Text"] = df_OCR.loc[next_246, "Tekst"]
 
-        # Amount
+        # Amount (X0∈[418,450.5])
         next_amt = (
             df_OCR.loc[idx + 1 :, "X0"]
             .where(df_OCR["X0"].between(418, 450.5))
@@ -171,10 +171,10 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
         if pd.notna(next_amt):
             df_OCR.loc[idx, "Amount"] = df_OCR.loc[next_amt, "Tekst"]
 
-        # Saldo po transakcji (X0 ~ 523.5)
+        # Saldo po transakcji – SZUKAMY PO X1≈580
         next_bal = (
-            df_OCR.loc[idx + 1 :, "X0"]
-            .where(df_OCR["X0"].between(BAL_X0 - BAL_TOL, BAL_X0 + BAL_TOL))
+            df_OCR.loc[idx + 1 :, "X1"]
+            .where(df_OCR["X1"].between(BAL_TARGET_X1 - BAL_TARGET_TOL, BAL_TARGET_X1 + BAL_TARGET_TOL))
             .dropna()
             .index.min()
         )
@@ -197,7 +197,7 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     df_OCR.drop(columns="Tekst", inplace=True, errors="ignore")
     df_OCR.rename(columns={"Strona": "Page"}, inplace=True)
 
-    # Kolejność kolumn 1:1 (z dodanym "Saldo po transakcji")
+    # Kolejność kolumn (z dodanym "Saldo po transakcji")
     df_OCR = df_OCR[["Page", "Date", "Partner name", "Text", "Amount", "Saldo po transakcji"]]
 
     # Amount -> Currency + Amount (ostatnie 3 znaki)
@@ -231,7 +231,7 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
 
     df_OCR["FV"] = df_OCR["FV"].apply(dedup_space_separated)
 
-    # Finalna kolejność (dodane "Saldo po transakcji")
+    # Finalna kolejność
     df_OCR = df_OCR[["Page", "Date", "Partner name", "Text", "Amount", "Currency", "Saldo po transakcji", "FV"]]
     return df_OCR
 
@@ -321,5 +321,3 @@ elif not uploaded and process_btn:
     st.warning("Najpierw wgraj plik PDF.")
 
 st.divider()
-
-
