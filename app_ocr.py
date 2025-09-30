@@ -94,13 +94,13 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     Przetwarzanie 1:1 z bazowego skryptu + kolumna „Saldo po transakcji”.
     Logika:
     - filtry Y0, tekstowe
-    - filtry X0 z wyjątkiem okolic X0≈523.5 (aby nie wyciąć wierszy salda)
+    - filtry X0 z wyjątkiem zakresu X0∈[517,523] (tam są salda)
     - group = (X0 != shift(X0)).cumsum(), Tekst = transform(' '.join) per (X0, group)
     - Text: dla X0==81 -> pierwszy kolejny X0==246
     - Amount: pierwszy kolejny X0∈[418,450.5]
-    - Saldo po transakcji: pierwszy kolejny wiersz z X1≈580 (tolerancja)
+    - Saldo po transakcji: pierwszy kolejny wiersz na TEJ SAMEJ STRONIE z X0∈[517,523] i X1≈580
+      dopasowany po Y0 do wiersza X0==81 (żeby się nie mieszały między liniami)
     - Date: wiersz z X0∈[30.19,30.20] -> najbliższy następny X0==81
-    - końcowe kolumny + FV jak w bazie
     """
     # --- Filtry Y0 (nagłówki/stopki) ---
     df_OCR = df_OCR.loc[~df_OCR["Y0"].between(29.32, 80)]
@@ -130,13 +130,11 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     pattern = r"\b\d{2}\s+\d{4}\s+\d{4}\s+\d{4}\s+\d{4}\s+\d{4}\s+\d{4}\b"
     df_OCR = df_OCR[~df_OCR["Tekst"].str.contains(pattern, regex=True, na=False)]
 
-    # --- Filtry X0 (zachowujemy okolice X0≈523.5, bo tam jest saldo; X1 użyjemy do wyszukania celu) ---
+    # --- Filtry X0 ---
+    # (wąskie wycięcie artefaktu)
     df_OCR = df_OCR.loc[~df_OCR["X0"].between(519.141, 519.142)]
-    BAL_KEEP_X0 = 523.5
-    BAL_KEEP_TOL = 1.0  # okno: [522.5, 524.5] – szerzej, żeby nie uciąć salda
-    mask_remove_500_530 = df_OCR["X0"].between(500, 530) & ~df_OCR["X0"].between(
-        BAL_KEEP_X0 - BAL_KEEP_TOL, BAL_KEEP_X0 + BAL_KEEP_TOL
-    )
+    # Z ogólnego okna 500–530 NIE usuwamy zakresu [517,523], żeby zachować salda
+    mask_remove_500_530 = df_OCR["X0"].between(500, 530) & ~df_OCR["X0"].between(517, 523)
     df_OCR = df_OCR.loc[~mask_remove_500_530]
     df_OCR = df_OCR.loc[~df_OCR["X0"].between(263, 264)]
 
@@ -150,12 +148,16 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
     df_OCR["Amount"] = None
     df_OCR["Saldo po transakcji"] = None  # NOWA kolumna
 
-    # Parametry wyszukania salda po X1
-    BAL_TARGET_X1 = 580.0
-    BAL_TARGET_TOL = 0.5  # okno: [579.5, 580.5] – łapie 579.999999
+    # Parametry wyszukania salda
+    BAL_X0_MIN, BAL_X0_MAX = 517.0, 523.0
+    BAL_X1_TARGET, BAL_X1_TOL = 580.0, 0.6   # łapie 579.999999
+    BAL_Y_TOL = 3.0                           # dopasowanie wiersza po Y0
 
     # Mapowanie z wierszy X0==81
     for idx in df_OCR[df_OCR["X0"] == 81].index:
+        page = df_OCR.loc[idx, "Strona"]
+        anchor_y = df_OCR.loc[idx, "Y0"]
+
         # Text (X0==246)
         next_246 = df_OCR.loc[idx + 1 :, "X0"][df_OCR["X0"] == 246].index.min()
         if pd.notna(next_246):
@@ -171,15 +173,20 @@ def process_dataframe(df_OCR: pd.DataFrame) -> pd.DataFrame:
         if pd.notna(next_amt):
             df_OCR.loc[idx, "Amount"] = df_OCR.loc[next_amt, "Tekst"]
 
-        # Saldo po transakcji – SZUKAMY PO X1≈580
-        next_bal = (
-            df_OCR.loc[idx + 1 :, "X1"]
-            .where(df_OCR["X1"].between(BAL_TARGET_X1 - BAL_TARGET_TOL, BAL_TARGET_X1 + BAL_TARGET_TOL))
-            .dropna()
-            .index.min()
-        )
-        if pd.notna(next_bal):
-            df_OCR.loc[idx, "Saldo po transakcji"] = df_OCR.loc[next_bal, "Tekst"]
+        # Saldo po transakcji – SZUKAMY po X1≈580 w wierszach X0∈[517,523], na tej samej stronie i wierszu (Y0)
+        candidates = df_OCR.loc[idx + 1 :].copy()
+        candidates = candidates[
+            (candidates["Strona"] == page)
+            & (candidates["X0"].between(BAL_X0_MIN, BAL_X0_MAX))
+            & (candidates["X1"].between(BAL_X1_TARGET - BAL_X1_TOL, BAL_X1_TARGET + BAL_X1_TOL))
+        ]
+
+        # najpierw próbujemy dopasować po Y0 (ten sam wiersz)
+        same_row = candidates[ (candidates["Y0"] - anchor_y).abs() <= BAL_Y_TOL ]
+        target_idx = same_row.index.min() if not same_row.empty else candidates.index.min()
+
+        if pd.notna(target_idx):
+            df_OCR.loc[idx, "Saldo po transakcji"] = df_OCR.loc[target_idx, "Tekst"]
 
     # Date: wiersz z X0 w [30.19,30.20] -> najbliższy następny X0==81
     df_OCR["Date"] = None
